@@ -1,0 +1,108 @@
+---
+- hosts: mpi_nodes
+  become: true
+  become_method: sudo
+  become_user: root
+  vars:
+    ansible_become_pass: "{{ vault_sudo_password }}"
+  vars_files:
+    - secrets.yml
+  tasks:
+    - name: Create mpiuser user
+      ansible.builtin.user:
+        name: mpiuser
+        comment: "MPI User"
+        shell: /bin/bash
+        createhome: yes
+        password: "{{ mpi_user_password }}"
+        state: present
+
+    - name: Ensure mpiuser has sudo privileges
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/mpiuser
+        content: |
+          mpiuser ALL=(ALL) NOPASSWD:ALL
+        mode: '0440'
+
+    - name: Ensure SSH directory exists for mpiuser
+      file:
+        path: /home/mpiuser/.ssh
+        state: directory
+        owner: mpiuser
+        group: mpiuser
+        mode: '0700'
+
+    - name: Generate SSH key for mpiuser if not exists
+      ansible.builtin.openssh_keypair:
+        path: /home/mpiuser/.ssh/id_rsa
+        type: rsa
+        size: 2048
+        owner: mpiuser
+        mode: 0600
+      register: ssh_keypair_result
+
+    - name: Install sshpass if not exists
+      ansible.builtin.package:
+        name: sshpass
+        state: present
+
+    - name: Distribute SSH public key to other nodes
+      ansible.builtin.shell: |
+        sshpass -p '{{ mpi_user_password }}' ssh-copy-id -i /home/mpiuser/.ssh/id_rsa.pub -o StrictHostKeyChecking=no mpiuser@{{ item }}
+      loop: "{{ groups['mpi_nodes'] }}"
+      when: ssh_keypair_result.changed
+
+    - name: Create MPI hosts file
+      ansible.builtin.copy:
+        content: |
+          192.168.0.114
+          192.168.0.177
+        dest: /home/mpiuser/mpi_hosts
+        owner: mpiuser
+        mode: 0644
+
+    - name: Install OpenMPI, MPICH, OpenMP and related packages
+      ansible.builtin.package:
+        name:
+          - openmpi-bin
+          - openmpi-common
+          - openmpi-doc
+          - libopenmpi-dev
+          - mpich
+          - mpich-doc
+          - libmpich-dev
+          - libmpich12
+          - libmkl-full-dev
+        state: present
+
+    - name: Ensure 'software-properties-common' is installed
+      apt:
+        name: software-properties-common
+        state: present
+
+    - name: Add missing GPG key for the PPA
+      apt_key:
+        keyserver: keyserver.ubuntu.com
+        id: FCAE110B1118213C
+
+    - name: Add the graphics-drivers PPA
+      apt_repository:
+        repo: ppa:graphics-drivers/ppa
+        state: present
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Ensure build-essential, CMake and CUDA are installed
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - build-essential
+        - cmake
+        - dkms
+        - nvidia-driver-470
+        - nvidia-cuda-toolkit
+        - nvidia-utils-470
